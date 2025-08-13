@@ -5,46 +5,32 @@
         "github>nf-core/ops//.github/renovate/process_updaters.json5",
     ],
     prHeader: "## WARNING\n - [ ] I have made sure to update the singularity and conda images",
-    baseBranches: ["try-renovate"], // Change from ["master"] to your branch
+    prConcurrentLimit: 3,
+    ignorePaths: [
+        "**/tests/**/*.snap",
+        "**/tests/**/*.json",
+    ],
     packageRules: [
+        // Global rule: no auto-merge for all dependencies
         {
             matchDatasources: ["conda", "pypi", "docker"],
             automerge: false,
         },
+        // Standard container updates
         {
             matchDatasources: ["docker"],
             matchFileNames: ["modules/**/main.nf"],
             commitMessageTopic: "{{depName}} container",
             commitMessageExtra: "to {{newValue}}",
-            branchTopic: "renovate-{{{depNameSanitized}}}-{{{newMajor}}}{{#if isPatch}}.{{newMinor}}{{/if}}.x",
             labels: ["dependencies", "container", "auto-snapshot-update"],
             prBodyTemplate: "This PR updates the {{depName}} container from `{{currentValue}}` to `{{newValue}}`.\n\n**Automated Actions:**\n- Container references will be updated for both Docker and Singularity\n- Test snapshots will be regenerated automatically\n- Changes will be committed to this PR\n\n{{{changelogBody}}}\n\n---\n{{{controls}}}",
         },
-        {
-            matchDatasources: ["docker"],
-            matchFileNames: ["modules/**/environment.yml"],
-            commitMessageTopic: "{{depName}} container in conda environment",
-            commitMessageExtra: "to {{newValue}}",
-            labels: ["dependencies", "conda", "container"],
-        },
-        // Special handling for commercial tools
+        // Commercial tools - special handling
         {
             matchDatasources: ["docker"],
             matchFileNames: ["modules/**/{cellranger,cellrangerarc,cellrangeratac,spaceranger,xeniumranger,bcl2fastq,bclconvert}/**/main.nf"],
             labels: ["dependencies", "container", "commercial-tool", "manual-review-required"],
-            prBodyTemplate: "⚠️ **Commercial Tool Update** ⚠️\n\nThis PR updates a commercial tool container. Manual intervention may be required:\n\n{{depName}} container: `{{currentValue}}` → `{{newValue}}`\n\n**Required Actions:**\n1. Check if the container exists and is publicly available\n2. Review the module's README for specific update procedures\n3. Test manually if automated tests fail\n4. Update any hardcoded version strings in the module\n\n{{{changelogBody}}}\n\n---\n{{{controls}}}",
-        },
-    ],
-    prConcurrentLimit: 3,
-    ignorePaths: [
-        "**/tests/**/*.snap", // Ignore snapshot files to avoid conflicts
-        "**/tests/**/*.json", // Ignore test result files
-    ],
-    // Don't auto-merge container updates to allow for manual review
-    packageRules: [
-        {
-            matchDatasources: ["docker"],
-            automerge: false,
+            prBodyTemplate: "⚠️ **Commercial Tool Update** ⚠️\n\nThis PR updates a commercial tool container. Manual intervention may be required.\n\n{{{changelogBody}}}\n\n---\n{{{controls}}}",
         },
     ],
 }

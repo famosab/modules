@@ -3,16 +3,13 @@ name: Update Test Snapshots for Renovate PRs
 on:
   pull_request:
     types: [opened, synchronize]
-    branches:
-      - master
-      - main
+    branches: [master, main]
   workflow_dispatch:
-
 
 jobs:
   update-snapshots:
     runs-on: ubuntu-latest
-    if: startsWith(github.head_ref, 'renovate/') && (contains(github.event.pull_request.title, 'Docker tag') || contains(github.event.pull_request.title, 'container'))
+    if: startsWith(github.head_ref, 'renovate/') && contains(github.event.pull_request.title, 'container')
 
     steps:
       - name: Checkout PR
@@ -22,322 +19,98 @@ jobs:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
-
-      - name: Install nf-core
+      - name: Setup environment
         run: |
           pip install nf-core
-
-      - name: Setup Nextflow
-        uses: nf-core/setup-nextflow@v1
-        with:
-          version: "23.10.0"
+          curl -s https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
 
       - name: Setup Singularity
         uses: eWaterCycle/setup-singularity@v7
         with:
           singularity-version: 3.8.3
 
-      - name: Setup Docker
-        uses: docker/setup-buildx-action@v3
-
-      - name: Detect changed modules and container updates
-        id: changed-modules
+      - name: Detect changed modules
+        id: modules
         run: |
-          # Get list of changed module files
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E "(modules/.*/main\.nf|modules/.*/environment\.yml)" || true)
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep "modules/.*/main.nf" || true)
 
           if [ -z "$CHANGED_FILES" ]; then
-            echo "No module files changed"
             echo "modules=" >> $GITHUB_OUTPUT
-            echo "container_updates=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # Extract module names from file paths
-          MODULES=""
-          CONTAINER_UPDATES=false
-
-          for file in $CHANGED_FILES; do
-            # Extract module name from path like modules/nf-core/tool/subtool/main.nf
-            MODULE_NAME=$(echo $file | sed 's|modules/nf-core/||' | sed 's|/main\.nf||' | sed 's|/environment\.yml||')
-
-            # Check if this is a container update by looking at the diff
-            if git diff origin/${{ github.base_ref }}...HEAD "$file" | grep -E "(container|singularity)" | grep -E "(\+.*:|docker://|singularity://)" > /dev/null; then
-              CONTAINER_UPDATES=true
-              echo "Container update detected in $MODULE_NAME"
-            fi
-
-            MODULES="$MODULES $MODULE_NAME"
-          done
-
-          # Remove duplicates
-          MODULES=$(echo $MODULES | tr ' ' '\n' | sort -u | tr '\n' ' ')
-
+          MODULES=$(echo "$CHANGED_FILES" | sed 's|modules/nf-core/||' | sed 's|/main.nf||' | sort -u | tr '\n' ' ')
+          echo "modules=$MODULES" >> $GITHUB_OUTPUT
           echo "Changed modules: $MODULES"
-          echo "Container updates detected: $CONTAINER_UPDATES"
-          echo "modules<<EOF" >> $GITHUB_OUTPUT
-          echo "$MODULES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "container_updates=$CONTAINER_UPDATES" >> $GITHUB_OUTPUT
 
-      - name: Check for special container modules
-        id: special-modules
-        if: steps.changed-modules.outputs.modules != ''
+      - name: Check for commercial modules
+        id: commercial
         run: |
-          # List of modules that require special handling (commercial tools, manual container updates)
-          SPECIAL_MODULES=(
-            "cellranger"
-            "cellrangerarc"
-            "cellrangeratac"
-            "spaceranger"
-            "xeniumranger"
-            "bcl2fastq"
-            "bclconvert"
-            "antismash"
-            "parabricks"
-            "sentieon"
-          )
+          COMMERCIAL_TOOLS="cellranger|spaceranger|bcl2fastq|bclconvert|parabricks|sentieon"
+          MODULES="${{ steps.modules.outputs.modules }}"
 
-          MODULES="${{ steps.changed-modules.outputs.modules }}"
-          SKIP_TESTING=false
+          if echo "$MODULES" | grep -E "$COMMERCIAL_TOOLS" > /dev/null; then
+            echo "skip_tests=true" >> $GITHUB_OUTPUT
+            echo "Commercial module detected, skipping automated tests"
+          else
+            echo "skip_tests=false" >> $GITHUB_OUTPUT
+          fi
 
-          for module in $MODULES; do
-            for special in "${SPECIAL_MODULES[@]}"; do
-              if [[ "$module" == *"$special"* ]]; then
-                echo "Special module detected: $module (contains $special)"
-                SKIP_TESTING=true
-                break 2
-              fi
-            done
-          done
-
-          echo "skip_testing=$SKIP_TESTING" >> $GITHUB_OUTPUT
-
-      - name: Update Singularity container references
-        if: steps.changed-modules.outputs.container_updates == 'true' && steps.special-modules.outputs.skip_testing != 'true'
+      - name: Run tests and update snapshots
+        if: steps.modules.outputs.modules != '' && steps.commercial.outputs.skip_tests == 'false'
         run: |
-          MODULES="${{ steps.changed-modules.outputs.modules }}"
-
-          for MODULE in $MODULES; do
-            MODULE_FILE="modules/nf-core/$MODULE/main.nf"
-
-            if [ -f "$MODULE_FILE" ]; then
-              echo "Checking $MODULE_FILE for container updates..."
-
-              # Extract new Docker container reference
-              NEW_DOCKER=$(grep -E "^\s*container.*docker" "$MODULE_FILE" | sed -E "s/.*['\"]([^'\"]*)['\"].*/\1/" | head -1)
-
-              if [ ! -z "$NEW_DOCKER" ] && [[ "$NEW_DOCKER" != *"singularity"* ]]; then
-                echo "Found Docker container: $NEW_DOCKER"
-
-                # Convert Docker reference to Singularity format
-                if [[ "$NEW_DOCKER" == *"biocontainers/"* ]]; then
-                  # biocontainers format: biocontainers/tool:version -> depot.galaxyproject.org/singularity/tool:version
-                  TOOL_VERSION=$(echo "$NEW_DOCKER" | sed 's/biocontainers\///')
-                  NEW_SINGULARITY="https://depot.galaxyproject.org/singularity/$TOOL_VERSION"
-                elif [[ "$NEW_DOCKER" == *"community.wave.seqera.io"* ]] || [[ "$NEW_DOCKER" == *"quay.io/nf-core"* ]]; then
-                  # Keep wave/quay containers as-is for Singularity
-                  NEW_SINGULARITY="$NEW_DOCKER"
-                else
-                  # For other registries, try to find corresponding singularity URL
-                  NEW_SINGULARITY="$NEW_DOCKER"
-                fi
-
-                echo "Proposed Singularity container: $NEW_SINGULARITY"
-
-                # Update the singularity container reference in the file
-                sed -i.bak -E "s|(https://[^'\"]*singularity[^'\"]*)|$NEW_SINGULARITY|g" "$MODULE_FILE"
-
-                if ! cmp -s "$MODULE_FILE" "$MODULE_FILE.bak"; then
-                  echo "Updated Singularity container reference in $MODULE_FILE"
-                  rm "$MODULE_FILE.bak"
-                else
-                  echo "No Singularity container reference found to update in $MODULE_FILE"
-                  rm "$MODULE_FILE.bak"
-                fi
-              fi
-            fi
-          done
-
-      - name: Run nf-core modules test and update snapshots
-        if: steps.changed-modules.outputs.modules != '' && steps.special-modules.outputs.skip_testing != 'true'
-        run: |
-          set -e
-
-          # Read modules from the output
-          MODULES="${{ steps.changed-modules.outputs.modules }}"
-
-          for MODULE in $MODULES; do
+          for MODULE in ${{ steps.modules.outputs.modules }}; do
             echo "Testing module: $MODULE"
 
-            # Check if module test directory exists
             if [ -d "modules/nf-core/$MODULE/tests" ]; then
-              echo "Running tests for $MODULE..."
-
-              # Try different container engines in order of preference
-              TEST_PASSED=false
-
-              # Try Singularity first (most reliable for CI)
-              if command -v singularity &> /dev/null; then
-                echo "Attempting test with Singularity..."
-                if nf-core modules test $MODULE --update-snapshots --profile singularity 2>&1 | tee test_output.log; then
-                  TEST_PASSED=true
-                  echo "✅ Singularity test passed for $MODULE"
-                fi
-              fi
-
-              # If Singularity failed, try Docker
-              if [ "$TEST_PASSED" = false ] && command -v docker &> /dev/null; then
-                echo "Attempting test with Docker..."
-                if nf-core modules test $MODULE --update-snapshots --profile docker 2>&1 | tee test_output.log; then
-                  TEST_PASSED=true
-                  echo "✅ Docker test passed for $MODULE"
-                fi
-              fi
-
-              # If both failed, try conda as last resort (where applicable)
-              if [ "$TEST_PASSED" = false ]; then
-                echo "Attempting test with Conda..."
-                if nf-core modules test $MODULE --update-snapshots --profile conda 2>&1 | tee test_output.log; then
-                  TEST_PASSED=true
-                  echo "✅ Conda test passed for $MODULE"
-                fi
-              fi
-
-              if [ "$TEST_PASSED" = false ]; then
-                echo "❌ All test profiles failed for $MODULE"
-                echo "Last test output:"
-                cat test_output.log || echo "No test output available"
-              fi
-
-              # Clean up
-              rm -f test_output.log
-
+              # Try singularity first, then docker
+              nf-core modules test $MODULE --update-snapshots --profile singularity || \
+              nf-core modules test $MODULE --update-snapshots --profile docker || \
+              echo "❌ Tests failed for $MODULE"
             else
-              echo "No tests found for module $MODULE"
+              echo "No tests found for $MODULE"
             fi
           done
 
-      - name: Check for snapshot changes
-        id: check-changes
+      - name: Commit changes
         run: |
-          if git diff --quiet; then
-            echo "No changes to commit"
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-          else
-            echo "Changes detected"
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "Changed files:"
-            git diff --name-only
+          if ! git diff --quiet; then
+            git config --local user.email "action@github.com"
+            git config --local user.name "GitHub Action"
+
+            git add modules/**/tests/**/*.snap modules/**/tests/**/*.json modules/**/main.nf
+            git commit -m "Update snapshots for modules: ${{ steps.modules.outputs.modules }}
+
+            Co-authored-by: renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>"
+            git push origin ${{ github.head_ref }}
+
+            echo "HAS_CHANGES=true" >> $GITHUB_ENV
           fi
-
-      - name: Commit and push snapshot updates
-        if: steps.check-changes.outputs.has_changes == 'true'
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-
-          # Add all relevant files
-          git add modules/**/tests/**/*.snap
-          git add modules/**/tests/**/*.json
-          git add modules/**/tests/**/*.yml
-          git add modules/**/main.nf  # Include updated container references
-
-          # Create commit message
-          MODULES="${{ steps.changed-modules.outputs.modules }}"
-          COMMIT_MSG="Update test snapshots and container references for modules: $MODULES"
-
-          if [ "${{ steps.changed-modules.outputs.container_updates }}" = "true" ]; then
-            COMMIT_MSG="$COMMIT_MSG
-
-          - Updated Docker container references
-          - Updated Singularity container references
-          - Regenerated test snapshots"
-          fi
-
-          COMMIT_MSG="$COMMIT_MSG
-
-          Co-authored-by: renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>"
-
-          git commit -m "$COMMIT_MSG" || {
-            echo "No changes to commit"
-            exit 0
-          }
-
-          # Push changes back to the PR branch
-          git push origin ${{ github.head_ref }}
 
       - name: Comment on PR
-        if: steps.check-changes.outputs.has_changes == 'true'
+        if: env.HAS_CHANGES == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const modules = `${{ steps.changed-modules.outputs.modules }}`.split(' ').filter(m => m.trim());
-            const moduleList = modules.map(m => `- \`${m}\``).join('\n');
-            const containerUpdates = `${{ steps.changed-modules.outputs.container_updates }}` === 'true';
-            const specialModule = `${{ steps.special-modules.outputs.skip_testing }}` === 'true';
-
-            let body = `🤖 **Automated Container and Snapshot Update**
-
-            I've automatically processed the following modules:
-            ${moduleList}`;
-
-            if (containerUpdates) {
-              body += `
-
-            ### Container Updates
-            - ✅ Updated Docker container references
-            - ✅ Updated Singularity container references`;
-            }
-
-            if (!specialModule) {
-              body += `
-            - ✅ Regenerated test snapshots`;
-            } else {
-              body += `
-
-            ### Special Module Notice
-            ⚠️ This module requires special handling for container updates (commercial tool or manual process).
-            Please review the module's README for specific update instructions.`;
-            }
-
-            body += `
-
-            The changes have been committed to this PR branch.`;
+            const modules = `${{ steps.modules.outputs.modules }}`.split(' ').filter(m => m.trim());
+            const moduleList = modules.map(m => `\`${m}\``).join(', ');
 
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: body
+              body: `🤖 **Automated Update Complete**\n\nUpdated test snapshots for: ${moduleList}`
             });
 
-      - name: Comment on special modules
-        if: steps.special-modules.outputs.skip_testing == 'true'
+      - name: Comment on commercial modules
+        if: steps.commercial.outputs.skip_tests == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const modules = `${{ steps.changed-modules.outputs.modules }}`.split(' ').filter(m => m.trim());
-            const moduleList = modules.map(m => `- \`${m}\``).join('\n');
-
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `🏭 **Commercial/Special Module Detected**
-
-            The following modules require manual container updates:
-            ${moduleList}
-
-            These modules contain commercial tools or require special handling. Please:
-            1. Check the module's README for specific update instructions
-            2. Manually build and push updated containers if needed
-            3. Update container references in the module files
-            4. Run tests manually to verify functionality
-
-            This PR has been automatically updated with basic changes, but manual review is required.`
+              body: `⚠️ **Commercial module detected** - Manual review required for container updates.`
             });
