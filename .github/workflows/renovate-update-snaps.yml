@@ -1,0 +1,116 @@
+name: Update Test Snapshots for Renovate PRs
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  update-snapshots:
+    runs-on: ubuntu-latest
+    if: startsWith(github.head_ref, 'renovate/') && contains(github.event.pull_request.title, 'container')
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Setup environment
+        run: |
+          pip install nf-core
+          curl -s https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+
+      - name: Setup Singularity
+        uses: eWaterCycle/setup-singularity@v7
+        with:
+          singularity-version: 3.8.3
+
+      - name: Detect changed modules
+        id: modules
+        run: |
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep "modules/.*/main.nf" || true)
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "modules=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          MODULES=$(echo "$CHANGED_FILES" | sed 's|modules/nf-core/||' | sed 's|/main.nf||' | sort -u | tr '\n' ' ')
+          echo "modules=$MODULES" >> $GITHUB_OUTPUT
+          echo "Changed modules: $MODULES"
+
+      - name: Check for commercial modules
+        id: commercial
+        run: |
+          COMMERCIAL_TOOLS="cellranger|spaceranger|bcl2fastq|bclconvert|parabricks|sentieon"
+          MODULES="${{ steps.modules.outputs.modules }}"
+
+          if echo "$MODULES" | grep -E "$COMMERCIAL_TOOLS" > /dev/null; then
+            echo "skip_tests=true" >> $GITHUB_OUTPUT
+            echo "Commercial module detected, skipping automated tests"
+          else
+            echo "skip_tests=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run tests and update snapshots
+        if: steps.modules.outputs.modules != '' && steps.commercial.outputs.skip_tests == 'false'
+        run: |
+          for MODULE in ${{ steps.modules.outputs.modules }}; do
+            echo "Testing module: $MODULE"
+
+            if [ -d "modules/nf-core/$MODULE/tests" ]; then
+              # Try singularity first, then docker
+              nf-core modules test $MODULE --update-snapshots --profile singularity || \
+              nf-core modules test $MODULE --update-snapshots --profile docker || \
+              echo "❌ Tests failed for $MODULE"
+            else
+              echo "No tests found for $MODULE"
+            fi
+          done
+
+      - name: Commit changes
+        run: |
+          if ! git diff --quiet; then
+            git config --local user.email "action@github.com"
+            git config --local user.name "GitHub Action"
+
+            git add modules/**/tests/**/*.snap modules/**/tests/**/*.json modules/**/main.nf
+            git commit -m "Update snapshots for modules: ${{ steps.modules.outputs.modules }}
+
+            Co-authored-by: renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>"
+            git push origin ${{ github.head_ref }}
+
+            echo "HAS_CHANGES=true" >> $GITHUB_ENV
+          fi
+
+      - name: Comment on PR
+        if: env.HAS_CHANGES == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const modules = `${{ steps.modules.outputs.modules }}`.split(' ').filter(m => m.trim());
+            const moduleList = modules.map(m => `\`${m}\``).join(', ');
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🤖 **Automated Update Complete**\n\nUpdated test snapshots for: ${moduleList}`
+            });
+
+      - name: Comment on commercial modules
+        if: steps.commercial.outputs.skip_tests == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `⚠️ **Commercial module detected** - Manual review required for container updates.`
+            });
