@@ -5,22 +5,32 @@
         "github>nf-core/ops//.github/renovate/process_updaters.json5",
     ],
     prHeader: "## WARNING\n - [ ] I have made sure to update the singularity and conda images",
+    prConcurrentLimit: 3,
+    ignorePaths: [
+        "**/tests/**/*.snap",
+        "**/tests/**/*.json",
+    ],
     packageRules: [
+        // Global rule: no auto-merge for all dependencies
         {
             matchDatasources: ["conda", "pypi", "docker"],
             automerge: false,
         },
-    ],
-    customManagers: [
+        // Standard container updates
         {
-            customType: "regex",
-            managerFilePatterns: [
-                "/(^|/)(workflow-templates|\\.(?:github|gitea|forgejo)/(?:workflows|actions))/.+\\.ya?ml$/",
-                "/(^|/)action\\.ya?ml$/",
-            ],
-            matchStrings: [
-                "# renovate: datasource=(?<datasource>[a-z-.]+?) depName=(?<depName>[^\\s]+?)(?: (?:lookupName|packageName)=(?<packageName>[^\\s]+?))?(?: versioning=(?<versioning>[^\\s]+?))?(?: extractVersion=(?<extractVersion>[^\\s]+?))?\\s+[A-Za-z0-9_]+?_VER(SION)?\\s*:\\s*[\"']?(?<currentValue>.+?)[\"']?\\s",
-            ],
+            matchDatasources: ["docker"],
+            matchFileNames: ["modules/**/main.nf"],
+            commitMessageTopic: "{{depName}} container",
+            commitMessageExtra: "to {{newValue}}",
+            labels: ["dependencies", "container", "auto-snapshot-update"],
+            prBodyTemplate: "This PR updates the {{depName}} container from `{{currentValue}}` to `{{newValue}}`.\n\n**Automated Actions:**\n- Container references will be updated for both Docker and Singularity\n- Test snapshots will be regenerated automatically\n- Changes will be committed to this PR\n\n{{{changelogBody}}}\n\n---\n{{{controls}}}",
+        },
+        // Commercial tools - special handling
+        {
+            matchDatasources: ["docker"],
+            matchFileNames: ["modules/**/{cellranger,cellrangerarc,cellrangeratac,spaceranger,xeniumranger,bcl2fastq,bclconvert}/**/main.nf"],
+            labels: ["dependencies", "container", "commercial-tool", "manual-review-required"],
+            prBodyTemplate: "⚠️ **Commercial Tool Update** ⚠️\n\nThis PR updates a commercial tool container. Manual intervention may be required.\n\n{{{changelogBody}}}\n\n---\n{{{controls}}}",
         },
     ],
 }
