@@ -25,10 +25,20 @@ input:
         description: |
           Input tumour sample bam file (or cram)
         ontologies: []
+    - tumor_index:
+        type: file
+        description: |
+          Input tumour sample bam index file (or cram index)
+        ontologies: []
     - normal:
         type: file
         description: |
           Input normal sample bam file (or cram)
+        ontologies: []
+    - normal_index:
+        type: file
+        description: |
+          Input normal sample bam index file (or cram index)
         ontologies: []
   - - meta2:
         type: map
